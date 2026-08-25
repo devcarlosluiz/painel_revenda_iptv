@@ -57,11 +57,18 @@ export function activeConnections(lineId) {
  */
 export function openConnection(line, kind, contentId, contentName, ip, ua) {
   pruneConnections();
+  // uma conexao por linha+ip: trocar de canal reaproveita o mesmo registro em vez
+  // de abrir outro. o limite continua valendo entre dispositivos/ips diferentes.
   const same = get(
-    'SELECT * FROM connections WHERE line_id = ? AND ip = ? AND kind = ? AND content_id = ?',
-    line.id, ip, kind, contentId);
+    'SELECT * FROM connections WHERE line_id = ? AND ip = ? ORDER BY started_at LIMIT 1',
+    line.id, ip);
   if (same) {
-    run('UPDATE connections SET last_beat = ? WHERE id = ?', now(), same.id);
+    run(`UPDATE connections
+            SET kind = ?, content_id = ?, content_name = ?, user_agent = ?, last_beat = ?
+          WHERE id = ?`,
+        kind, contentId, contentName, ua, now(), same.id);
+    // limpa duplicatas herdadas do modelo antigo (uma conexao por canal)
+    run('DELETE FROM connections WHERE line_id = ? AND ip = ? AND id != ?', line.id, ip, same.id);
     return { ok: true, id: same.id };
   }
   const count = get('SELECT COUNT(*) AS n FROM connections WHERE line_id = ?', line.id).n;
@@ -78,8 +85,11 @@ export function heartbeat(id, bytes = 0) {
   run('UPDATE connections SET last_beat = ?, bytes = bytes + ? WHERE id = ?', now(), bytes, id);
 }
 
-export function closeConnection(id) {
-  run('DELETE FROM connections WHERE id = ?', id);
+export function closeConnection(id, kind, contentId) {
+  // com o dedupe por linha+ip o registro pode ja ter migrado para outro conteudo:
+  // nesse caso quem terminou nao e quem esta tocando agora, entao nao encerra.
+  if (kind === undefined) return run('DELETE FROM connections WHERE id = ?', id);
+  run('DELETE FROM connections WHERE id = ? AND kind = ? AND content_id = ?', id, kind, contentId);
 }
 
 export function touchLine(line, ip, ua) {

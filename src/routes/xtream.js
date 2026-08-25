@@ -2,6 +2,7 @@ import express from 'express';
 import { all, get } from '../db.js';
 import { config } from '../config.js';
 import { now, clientIp, escapeXml } from '../lib/helpers.js';
+import { gzipSink, gzipJson } from '../lib/gzip.js';
 import { authLine, allowedCategories, activeConnections, touchLine, logActivity } from '../services/access.js';
 import { lineStatus } from '../services/lines.js';
 
@@ -287,10 +288,10 @@ function epgRow(p, streamId) {
   };
 }
 
-router.get('/player_api.php', playerApi);
-router.post('/player_api.php', playerApi);
-router.get('/panel_api.php', playerApi);
-router.post('/panel_api.php', playerApi);
+router.get('/player_api.php', gzipJson, playerApi);
+router.post('/player_api.php', gzipJson, playerApi);
+router.get('/panel_api.php', gzipJson, playerApi);
+router.post('/panel_api.php', gzipJson, playerApi);
 
 // ----------------------------------------------------------------
 // get.php  ->  playlist M3U personalizada do cliente
@@ -320,16 +321,17 @@ router.get('/get.php', (req, res) => {
 
   res.setHeader('Content-Type', 'audio/x-mpegurl; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="${line.username}.m3u"`);
-  res.write('#EXTM3U\n');
+  const out = gzipSink(req, res);
+  out.write('#EXTM3U\n');
 
   const emit = (name, logo, group, epgId, url) => {
     if (plus) {
-      res.write(`#EXTINF:-1 tvg-id="${epgId || ''}" tvg-name="${String(name).replace(/"/g, "'")}" ` +
+      out.write(`#EXTINF:-1 tvg-id="${epgId || ''}" tvg-name="${String(name).replace(/"/g, "'")}" ` +
                 `tvg-logo="${logo || ''}" group-title="${String(group).replace(/"/g, "'")}",${name}\n`);
     } else {
-      res.write(`#EXTINF:-1,${name}\n`);
+      out.write(`#EXTINF:-1,${name}\n`);
     }
-    res.write(`${url}\n`);
+    out.write(`${url}\n`);
   };
 
   if (want === 'all' || want === 'live') {
@@ -358,7 +360,7 @@ router.get('/get.php', (req, res) => {
       emit(e.name, e.logo, e.cat || 'Series', null, `${base}/series/${up}/${e.id}.${e.container}`);
     }
   }
-  res.end();
+  out.end();
 });
 
 // ----------------------------------------------------------------
@@ -375,13 +377,14 @@ router.get('/xmltv.php', (req, res) => {
       WHERE s.enabled = 1 AND s.epg_id IS NOT NULL AND s.epg_id != '' ${f.sql}`, ...f.params);
 
   res.setHeader('Content-Type', 'application/xml; charset=utf-8');
-  res.write('<?xml version="1.0" encoding="UTF-8"?>\n<tv generator-info-name="CLM IPTV Panel">\n');
+  const out = gzipSink(req, res);
+  out.write('<?xml version="1.0" encoding="UTF-8"?>\n<tv generator-info-name="CLM IPTV Panel">\n');
 
   const seen = new Set();
   for (const c of channels) {
     if (seen.has(c.epg_id)) continue;
     seen.add(c.epg_id);
-    res.write(`  <channel id="${escapeXml(c.epg_id)}"><display-name>${escapeXml(c.name)}</display-name>` +
+    out.write(`  <channel id="${escapeXml(c.epg_id)}"><display-name>${escapeXml(c.name)}</display-name>` +
               (c.logo ? `<icon src="${escapeXml(c.logo)}"/>` : '') + '</channel>\n');
   }
   const fmt = (ts) => {
@@ -393,13 +396,13 @@ router.get('/xmltv.php', (req, res) => {
   for (const ch of seen) {
     for (const p of all(
       'SELECT * FROM epg_programmes WHERE channel_id = ? AND stop_ts > ? ORDER BY start_ts', ch, now() - 86400)) {
-      res.write(`  <programme start="${fmt(p.start_ts)}" stop="${fmt(p.stop_ts)}" channel="${escapeXml(ch)}">` +
+      out.write(`  <programme start="${fmt(p.start_ts)}" stop="${fmt(p.stop_ts)}" channel="${escapeXml(ch)}">` +
                 `<title lang="pt">${escapeXml(p.title)}</title>` +
                 (p.description ? `<desc lang="pt">${escapeXml(p.description)}</desc>` : '') +
                 '</programme>\n');
     }
   }
-  res.end('</tv>\n');
+  out.end('</tv>\n');
 });
 
 export default router;

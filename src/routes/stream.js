@@ -165,7 +165,7 @@ async function serve(kind, req, res) {
     return res.redirect(302, item.url);
   }
 
-  res.on('close', () => { if (kind !== 'live') closeConnection(conn.id); });
+  res.on('close', () => { if (kind !== 'live') closeConnection(conn.id, kind, item.id); });
   return pipeSource(req, res, item.url, line.id, conn.id);
 }
 
