@@ -8,12 +8,12 @@ services:
     volumes:
       - ./data:/app/data          # banco de dados
       - ./lista.m3u:/app/lista.m3u:ro
+    env_file:
+      - .env                      # JWT_SECRET, STREAM_MODE, TRIAL_HOURS etc.
     environment:
       PORT: 8080
-      # troque pelo dominio/IP que os clientes vao acessar
-      PUBLIC_URL: http://SEU-IP-OU-DOMINIO:8080
-      JWT_SECRET: troque-esta-chave-por-uma-aleatoria-longa
-      STREAM_MODE: redirect       # ou proxy
-      TRIAL_HOURS: 6
+      HOST: 0.0.0.0               # escuta em todas as interfaces do container
+      # dominio/IP que os clientes vao acessar (sobrescreve o do .env se precisar)
+      PUBLIC_URL: http://129.213.129.0:8080
       DB_PATH: /app/data/panel.db
       M3U_PATH: /app/lista.m3u

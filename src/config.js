@@ -14,6 +14,7 @@ const num = (v, d) => (v === undefined || v === '' || isNaN(Number(v)) ? d : Num
 
 export const config = {
   port:           num(process.env.PORT, 8080),
+  host:           process.env.HOST || '0.0.0.0',
   publicUrl:     (process.env.PUBLIC_URL || `http://localhost:${num(process.env.PORT, 8080)}`).replace(/\/+$/, ''),
   jwtSecret:      process.env.JWT_SECRET || 'clm-iptv-dev-secret-troque-isto',
   sessionHours:   num(process.env.SESSION_HOURS, 12),

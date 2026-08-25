@@ -52,11 +52,13 @@ setInterval(() => {
   } catch (e) { console.error('manutencao:', e.message); }
 }, 60_000).unref();
 
-const server = app.listen(config.port, () => {
+const server = app.listen(config.port, config.host, () => {
   const admins = get("SELECT COUNT(*) AS n FROM users WHERE role = 'admin'").n;
   console.log('');
   console.log('  ██ CLM IPTV PANEL');
-  console.log(`  painel .......: http://localhost:${config.port}/painel/`);
+  console.log(`  painel .......: ${config.publicUrl}/painel/`);
+  console.log(`  local ........: http://localhost:${config.port}/painel/`);
+  console.log(`  escutando ....: ${config.host}:${config.port}`);
   console.log(`  url publica ..: ${config.publicUrl}`);
   console.log(`  modo stream ..: ${config.streamMode}`);
   console.log(`  conteudo .....: ${get('SELECT COUNT(*) AS n FROM streams').n} canais | ` +

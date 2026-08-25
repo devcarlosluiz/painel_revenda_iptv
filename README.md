@@ -19,7 +19,8 @@ npm run import       # carrega a lista.m3u no banco
 npm start            # sobe o painel
 ```
 
-Abra **http://localhost:8080/painel/** e entre com o usuário/senha que o `setup` mostrou no terminal.
+Abra **http://129.213.129.0:8080/painel/** (ou `http://localhost:8080/painel/` na própria máquina)
+e entre com o usuário/senha que o `setup` mostrou no terminal.
 
 > No Windows dá para usar o atalho: dê dois cliques em **`iniciar.bat`** — ele instala, configura e abre o painel.
 
@@ -113,7 +114,8 @@ está fora do pacote → o player para de funcionar na hora. Não existe link "s
 
 ```ini
 PORT=8080
-PUBLIC_URL=http://localhost:8080   # <- o endereço que o CLIENTE usa. Troque em produção!
+HOST=0.0.0.0                       # interface de escuta. 0.0.0.0 = aceita acesso externo
+PUBLIC_URL=http://129.213.129.0:8080   # <- o endereço que o CLIENTE usa
 JWT_SECRET=...                     # gerado pelo setup
 STREAM_MODE=redirect               # redirect | proxy
 TRIAL_HOURS=6                      # duração padrão do teste
@@ -123,6 +125,11 @@ DB_PATH=./data/panel.db
 
 > **`PUBLIC_URL` é o item mais importante.** Ele é usado para montar os links dos clientes.
 > Se ficar em `localhost`, só funciona na sua máquina. Coloque seu IP público ou domínio.
+> Neste servidor o valor é `http://129.213.129.0:8080` — painel em
+> **http://129.213.129.0:8080/painel/**.
+>
+> `HOST` controla onde o processo escuta. Deixe `0.0.0.0` para aceitar conexões de fora;
+> use `127.0.0.1` apenas quando houver um Nginx na frente (ver HTTPS abaixo).
 
 ### redirect x proxy
 
@@ -169,7 +176,8 @@ Sem Docker:
 git clone/copiar o projeto para /opt/iptv
 cd /opt/iptv && npm install --omit=dev
 npm run setup && npm run import
-# edite o .env: PUBLIC_URL=http://SEU-IP:8080
+cp .env.example .env
+# .env: HOST=0.0.0.0 e PUBLIC_URL=http://129.213.129.0:8080
 ```
 
 `/etc/systemd/system/iptv.service`:
@@ -193,10 +201,19 @@ WantedBy=multi-user.target
 systemctl enable --now iptv
 ```
 
+> A porta 8080 precisa estar liberada no firewall do sistema **e** na security list /
+> network security group do provedor (Oracle Cloud, AWS etc.), senão o IP público não responde:
+>
+> ```bash
+> sudo iptables -I INPUT -p tcp --dport 8080 -j ACCEPT   # Oracle Linux/Ubuntu na OCI
+> sudo netfilter-persistent save
+> ```
+
 Com Docker:
 
 ```bash
-# edite PUBLIC_URL e JWT_SECRET no docker-compose.yml
+cp .env.example .env          # o compose lê JWT_SECRET e afins deste arquivo
+# PUBLIC_URL=http://129.213.129.0:8080 já está no docker-compose.yml
 docker compose up -d
 docker compose exec painel node src/scripts/setup.js --user admin --pass suasenha
 docker compose exec painel node src/scripts/import-m3u.js
@@ -223,7 +240,8 @@ server {
 }
 ```
 
-Depois é só ajustar `PUBLIC_URL=https://tv.seudominio.com.br` no `.env` e reiniciar.
+Nesse cenário troque `HOST=127.0.0.1` e `PUBLIC_URL=https://tv.seudominio.com.br` no `.env`
+e reinicie.
 
 ---
 
