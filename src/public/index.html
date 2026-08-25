@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CLM IPTV - Painel</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📺</text></svg>">
+</head>
+<body>
+
+<!-- ---------------- LOGIN ---------------- -->
+<div id="login">
+  <form class="card-login" id="loginForm">
+    <div class="logo" style="margin-bottom:14px">📺</div>
+    <h1>CLM IPTV</h1>
+    <p>Painel de revenda</p>
+    <div class="field">
+      <label>Usuário</label>
+      <input class="inp" id="lgUser" autocomplete="username" autofocus>
+    </div>
+    <div class="field">
+      <label>Senha</label>
+      <input class="inp" id="lgPass" type="password" autocomplete="current-password">
+    </div>
+    <button class="btn pri" style="width:100%;justify-content:center" id="lgBtn">Entrar</button>
+    <div id="lgErr" style="color:var(--err);font-size:12.5px;margin-top:12px;min-height:18px"></div>
+  </form>
+</div>
+
+<!-- ---------------- APP ---------------- -->
+<div id="app">
+  <aside>
+    <div class="brand">
+      <div class="logo">📺</div>
+      <div><b>CLM IPTV</b><small>painel de revenda</small></div>
+    </div>
+    <nav id="nav"></nav>
+    <div class="me">
+      <div class="row"><span>Usuário</span><b id="meUser">-</b></div>
+      <div class="row"><span>Créditos</span><b id="meCred">-</b></div>
+      <div class="row" style="margin-top:9px">
+        <button class="btn sm" onclick="app.trocarSenha()">Senha</button>
+        <button class="btn sm err" onclick="app.sair()">Sair</button>
+      </div>
+    </div>
+  </aside>
+  <main id="view"></main>
+</div>
+
+<div class="overlay" id="overlay"><div class="modal" id="modal"></div></div>
+
+<script src="app.js"></script>
+</body>
+</html>
