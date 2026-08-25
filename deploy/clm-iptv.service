@@ -1,0 +1,28 @@
+[Unit]
+Description=CLM IPTV Panel
+Documentation=https://github.com/devcarlosluiz/clm_painel_iptv
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__RUN_USER__
+Group=__RUN_USER__
+WorkingDirectory=__APP_DIR__
+ExecStart=/usr/bin/node src/server.js
+Restart=always
+RestartSec=3
+Environment=NODE_ENV=production
+
+# o painel le o .env pelo proprio config.js, nao precisa de EnvironmentFile
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ReadWritePaths=__APP_DIR__/data
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=clm-iptv
+
+[Install]
+WantedBy=multi-user.target

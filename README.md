@@ -19,8 +19,8 @@ npm run import       # carrega a lista.m3u no banco
 npm start            # sobe o painel
 ```
 
-Abra **http://129.213.129.0:8080/painel/** (ou `http://localhost:8080/painel/` na própria máquina)
-e entre com o usuário/senha que o `setup` mostrou no terminal.
+Abra **http://localhost:8080/painel/** e entre com o usuário/senha que o `setup` mostrou no terminal.
+Para colocar no ar num servidor, veja [DEPLOY.md](DEPLOY.md).
 
 > No Windows dá para usar o atalho: dê dois cliques em **`iniciar.bat`** — ele instala, configura e abre o painel.
 
@@ -115,7 +115,7 @@ está fora do pacote → o player para de funcionar na hora. Não existe link "s
 ```ini
 PORT=8080
 HOST=0.0.0.0                       # interface de escuta. 0.0.0.0 = aceita acesso externo
-PUBLIC_URL=http://129.213.129.0:8080   # <- o endereço que o CLIENTE usa
+PUBLIC_URL=http://localhost:8080   # <- o endereço que o CLIENTE usa. Troque em produção!
 JWT_SECRET=...                     # gerado pelo setup
 STREAM_MODE=redirect               # redirect | proxy
 TRIAL_HOURS=6                      # duração padrão do teste
@@ -125,8 +125,8 @@ DB_PATH=./data/panel.db
 
 > **`PUBLIC_URL` é o item mais importante.** Ele é usado para montar os links dos clientes.
 > Se ficar em `localhost`, só funciona na sua máquina. Coloque seu IP público ou domínio.
-> Neste servidor o valor é `http://129.213.129.0:8080` — painel em
-> **http://129.213.129.0:8080/painel/**.
+> No deploy da Oracle Cloud o [`deploy/install.sh`](deploy/install.sh) preenche esse valor
+> sozinho, com o IP público que ele lê do metadata da instância.
 >
 > `HOST` controla onde o processo escuta. Deixe `0.0.0.0` para aceitar conexões de fora;
 > use `127.0.0.1` apenas quando houver um Nginx na frente (ver HTTPS abaixo).
@@ -170,6 +170,10 @@ Para atualizar sozinho todo dia às 4h (Linux):
 
 ## 7. Colocar em produção (VPS)
 
+> **Oracle Cloud:** use o [DEPLOY.md](DEPLOY.md) — o [`deploy/install.sh`](deploy/install.sh)
+> instala Node, código, serviço systemd e firewall num comando só, detectando o IP público
+> da instância automaticamente. As instruções abaixo são o passo a passo manual equivalente.
+
 Sem Docker:
 
 ```bash
@@ -177,7 +181,7 @@ git clone/copiar o projeto para /opt/iptv
 cd /opt/iptv && npm install --omit=dev
 npm run setup && npm run import
 cp .env.example .env
-# .env: HOST=0.0.0.0 e PUBLIC_URL=http://129.213.129.0:8080
+# .env: HOST=0.0.0.0 e PUBLIC_URL=http://SEU-IP:8080
 ```
 
 `/etc/systemd/system/iptv.service`:
@@ -212,8 +216,7 @@ systemctl enable --now iptv
 Com Docker:
 
 ```bash
-cp .env.example .env          # o compose lê JWT_SECRET e afins deste arquivo
-# PUBLIC_URL=http://129.213.129.0:8080 já está no docker-compose.yml
+cp .env.example .env          # o compose lê PUBLIC_URL, JWT_SECRET e afins deste arquivo
 docker compose up -d
 docker compose exec painel node src/scripts/setup.js --user admin --pass suasenha
 docker compose exec painel node src/scripts/import-m3u.js

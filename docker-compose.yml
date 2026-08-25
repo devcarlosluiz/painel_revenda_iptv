@@ -13,7 +13,7 @@ services:
     environment:
       PORT: 8080
       HOST: 0.0.0.0               # escuta em todas as interfaces do container
-      # dominio/IP que os clientes vao acessar (sobrescreve o do .env se precisar)
-      PUBLIC_URL: http://129.213.129.0:8080
+      # dominio/IP que os clientes vao acessar (vem do .env; deploy na VM usa deploy/install.sh)
+      PUBLIC_URL: ${PUBLIC_URL:-http://localhost:8080}
       DB_PATH: /app/data/panel.db
       M3U_PATH: /app/lista.m3u
