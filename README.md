@@ -99,6 +99,13 @@ está fora do pacote → o player para de funcionar na hora. Não existe link "s
 **Conteúdo**
 - lista de canais, filmes e séries com busca, filtro por categoria e paginação
 - ocultar/ativar item, editar nome, categoria, logo, URL de origem e tvg-id
+- tela **Categorias**: criar, renomear, reordenar, juntar (mover o conteúdo de uma para outra) e excluir
+  — ao excluir uma categoria com conteúdo dentro, você escolhe entre mover os itens para outra
+  categoria ou apagar tudo junto
+- ao editar um item dá para trocar a categoria ou criar uma nova ali mesmo, sem sair da tela
+- seleção em lote: marque vários itens (a marcação segue ao virar de página) e mande todos para outra
+  categoria de uma vez — ou aplique a troca a **todos** os itens do filtro atual (busca + categoria)
+- exportar a lista já organizada em M3U ou CSV (só admin), para backup ou para levar a outro painel
 - botão **testar** que consulta a fonte na hora e mostra o tempo de resposta
 - adicionar canal manualmente
 - reimportar a lista sem quebrar nada: itens já existentes são atualizados pela URL de origem,
@@ -107,6 +114,8 @@ está fora do pacote → o player para de funcionar na hora. Não existe link "s
 **Monitoramento**
 - quem está assistindo agora (cliente, conteúdo, IP, player, início) com botão de derrubar
 - log de acessos e bloqueios, com o motivo de cada recusa
+- painel **Servidor** no dashboard (só admin, atualiza a cada 5s): CPU total e por núcleo, CPU e RAM
+  do processo do painel, memória e disco da máquina, load average, uptime, Node e tamanho do banco
 
 ---
 
@@ -121,6 +130,7 @@ STREAM_MODE=redirect               # redirect | proxy
 TRIAL_HOURS=6                      # duração padrão do teste
 CONNECTION_TTL=90                  # segundos sem sinal para liberar a conexão
 DB_PATH=./data/panel.db
+IMPORT_MAX_MB=200                  # tamanho máximo da lista anexada no painel
 ```
 
 > **`PUBLIC_URL` é o item mais importante.** Ele é usado para montar os links dos clientes.
@@ -145,10 +155,12 @@ marque `proxy` só nos canais que você quer proteger.
 
 ---
 
-## 6. Reimportar / trocar a lista
+## 6. Reimportar, trocar e exportar a lista
 
-Pelo painel: **Importar lista** — aceita arquivo no servidor, URL (`get.php` do seu fornecedor) ou
-texto colado. Opções: apagar tudo antes, ou ocultar o que sumiu da lista nova.
+Pelo painel: **Importar lista** — anexe o arquivo `.m3u` do seu computador (clicando ou arrastando
+para a área de anexo), informe uma URL (`get.php` do seu fornecedor) ou cole o texto da lista.
+Opções: apagar tudo antes, ou ocultar o que sumiu da lista nova. O limite do arquivo anexado é
+`IMPORT_MAX_MB` (200 MB por padrão).
 
 Pelo terminal:
 
@@ -165,6 +177,19 @@ Para atualizar sozinho todo dia às 4h (Linux):
 ```cron
 0 4 * * * cd /opt/iptv && /usr/bin/npm run import -- --url "SUA_URL" --prune >> /var/log/iptv-import.log 2>&1
 ```
+
+### Exportar (somente admin)
+
+Na mesma tela, em **Exportar a lista do painel**, escolha o conteúdo (tudo, canais, filmes ou séries),
+se quer apenas os itens ativos e o formato:
+
+- **M3U** — a lista com os nomes e categorias como você organizou, apontando para as **URLs de origem**.
+  Serve de backup e reimporta em outro painel sem perder a organização (os episódios saem como
+  `Serie S01 E02`, então voltam como série/temporada/episódio).
+- **CSV** — `tipo;id;nome;categoria;status;url;logo;tvg_id` com BOM, para conferir numa planilha.
+
+O arquivo do cliente continua sendo o link individual dele (**Clientes → links**), gerado pelo painel —
+a exportação é a lista interna, com as fontes originais, e revendedor não tem acesso a ela.
 
 ---
 
@@ -265,7 +290,28 @@ e reinicie.
 **Painel** — tudo sob `/api`, autenticado por token Bearer:
 `/login`, `/me`, `/dashboard`, `/lines`, `/lines/:id/renew`, `/lines/:id/kill`, `/users`,
 `/users/:id/credits`, `/credits`, `/bouquets`, `/plans`, `/categories`, `/content`,
-`/content/:type/:id/test`, `/connections`, `/activity`, `/import`, `/settings`.
+`/content/:type/:id/test`, `/connections`, `/activity`, `/import`, `/import/upload`, `/settings`.
+
+> Categorias: `GET /api/categories`, `POST /api/categories`, `PATCH /api/categories/:id`,
+> `POST /api/categories/:id/move` (`{to}` = categoria de destino) e
+> `DELETE /api/categories/:id` com `?move_to=id` (move o conteúdo antes) ou `?delete_content=1`
+> (apaga o conteúdo junto; séries levam os episódios por cascade). Sem nenhum dos dois, categoria
+> com conteúdo devolve 409 — é a trava contra apagar sem querer.
+>
+> Troca de categoria em lote: `POST /api/content/:type/category` com `{ids:[...]}` (itens marcados) ou
+> `{all:true, filtro:{search, category_id}}` (todo o filtro), mais `category_id` (ou `category_name`
+> para criar a categoria na hora; `category_id:null` tira a categoria).
+>
+> Exportação (só admin): `GET /api/export/m3u`, `GET /api/export/csv` e `GET /api/export/resumo`
+> (contagem antes de baixar), todos aceitando `type=all|live|movie|series`, `only_enabled=1|0`,
+> `category_id` e `search`.
+>
+> `GET /api/system` (só admin) devolve CPU (total, por núcleo e do processo), memória, disco,
+> load average, uptime da máquina e do painel, versão do Node e tamanho do banco.
+
+> `POST /api/import` recebe json com `url` ou `content`; `POST /api/import/upload` recebe o arquivo
+> no corpo cru da requisição (`content-type: application/octet-stream`) e lê as opções da query
+> string (`reset`, `prune`, `name`).
 
 ---
 
@@ -282,6 +328,7 @@ src/
     helpers.js           utilidades
   services/
     importer.js          importação com deduplicação por URL de origem
+    system.js            CPU/memória/disco da máquina (amostragem para o dashboard)
     access.js            autenticação do cliente, pacotes, limite de conexões, logs
     lines.js             clientes, renovação, créditos, escopo de revenda
   routes/

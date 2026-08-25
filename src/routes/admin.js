@@ -1,12 +1,12 @@
 import express from 'express';
-import fs from 'node:fs';
 import { all, get, run, tx, getSetting, setSetting } from '../db.js';
 import { config } from '../config.js';
 import { now, clientIp, bool } from '../lib/helpers.js';
 import { hashPassword, verifyPassword, issueToken, verifyToken, randomString } from '../lib/auth.js';
 import { ownerScope, lineUrls, lineStatus, createLine, renewLine, moveCredits } from '../services/lines.js';
 import { pruneConnections } from '../services/access.js';
-import { importFromFile, importFromUrl, importM3U, importState } from '../services/importer.js';
+import { importFromUrl, importM3U, importState } from '../services/importer.js';
+import { systemStats } from '../services/system.js';
 
 export const router = express.Router();
 router.use(express.json({ limit: '20mb' }));
@@ -47,6 +47,14 @@ const safeUser = (u) => ({
   whatsapp: u.whatsapp, credits: u.credits, parent_id: u.parent_id,
   status: u.status, can_trial: u.can_trial, created_at: u.created_at, last_login: u.last_login,
 });
+
+/** tabela de conteudo de cada tipo de categoria */
+const TABLES = { live: 'streams', movie: 'movies', series: 'series' };
+const TIPOS = Object.keys(TABLES);
+
+/** quantos itens usam a categoria */
+const itensDaCategoria = (cat) =>
+  get(`SELECT COUNT(*) AS n FROM ${TABLES[cat.type]} WHERE category_id = ?`, cat.id).n;
 
 // ----------------------------------------------------------------
 // login
@@ -325,6 +333,90 @@ router.get('/categories', (req, res) => {
   res.json(rows.map((c) => ({ ...c, itens: counts[c.type]?.[c.id] || 0 })));
 });
 
+router.post('/categories', admin, (req, res) => {
+  const b = req.body || {};
+  const name = String(b.name || '').trim();
+  const type = String(b.type || 'live');
+  if (!name) return res.status(400).json({ error: 'informe o nome da categoria' });
+  if (!TIPOS.includes(type)) return res.status(400).json({ error: 'tipo invalido' });
+  if (get('SELECT id FROM categories WHERE name = ? AND type = ?', name, type)) {
+    return res.status(409).json({ error: 'ja existe uma categoria com esse nome neste tipo' });
+  }
+  const r = run('INSERT INTO categories(name,type,sort_order) VALUES(?,?,?)', name, type, Number(b.sort_order) || 0);
+  res.json(get('SELECT * FROM categories WHERE id = ?', Number(r.lastInsertRowid)));
+});
+
+router.patch('/categories/:id', admin, (req, res) => {
+  const cat = get('SELECT * FROM categories WHERE id = ?', Number(req.params.id));
+  if (!cat) return res.status(404).json({ error: 'categoria nao encontrada' });
+  const b = req.body || {};
+  const name = b.name !== undefined ? String(b.name).trim() : cat.name;
+  const type = b.type !== undefined ? String(b.type) : cat.type;
+  const order = b.sort_order !== undefined ? Number(b.sort_order) : cat.sort_order;
+  if (!name) return res.status(400).json({ error: 'informe o nome da categoria' });
+  if (!TIPOS.includes(type)) return res.status(400).json({ error: 'tipo invalido' });
+  if (get('SELECT id FROM categories WHERE name = ? AND type = ? AND id <> ?', name, type, cat.id)) {
+    return res.status(409).json({ error: 'ja existe uma categoria com esse nome neste tipo' });
+  }
+  // o conteudo de cada tipo vive em uma tabela propria, entao trocar o tipo esconderia os itens
+  const itens = itensDaCategoria(cat);
+  if (type !== cat.type && itens) {
+    return res.status(409).json({ error: `a categoria tem ${itens} item(ns) - mova o conteudo antes de trocar o tipo` });
+  }
+  run('UPDATE categories SET name = ?, type = ?, sort_order = ? WHERE id = ?', name, type, order, cat.id);
+  res.json(get('SELECT * FROM categories WHERE id = ?', cat.id));
+});
+
+/** move o conteudo de uma categoria para outra do mesmo tipo */
+router.post('/categories/:id/move', admin, (req, res) => {
+  const cat = get('SELECT * FROM categories WHERE id = ?', Number(req.params.id));
+  if (!cat) return res.status(404).json({ error: 'categoria nao encontrada' });
+  const dest = get('SELECT * FROM categories WHERE id = ?', Number((req.body || {}).to));
+  if (!dest || dest.type !== cat.type) return res.status(400).json({ error: 'escolha uma categoria de destino do mesmo tipo' });
+  if (dest.id === cat.id) return res.status(400).json({ error: 'destino igual a origem' });
+  const r = run(`UPDATE ${TABLES[cat.type]} SET category_id = ? WHERE category_id = ?`, dest.id, cat.id);
+  res.json({ ok: true, movidos: Number(r.changes) });
+});
+
+/**
+ * Exclui a categoria. Tendo conteudo dentro, precisa dizer o que fazer com ele:
+ *   ?move_to=<id>        move para outra categoria do mesmo tipo
+ *   ?delete_content=1    apaga o conteudo junto (series levam os episodios por cascade)
+ */
+router.delete('/categories/:id', admin, (req, res) => {
+  const cat = get('SELECT * FROM categories WHERE id = ?', Number(req.params.id));
+  if (!cat) return res.status(404).json({ error: 'categoria nao encontrada' });
+
+  const destino = req.query.move_to ? get('SELECT * FROM categories WHERE id = ?', Number(req.query.move_to)) : null;
+  if (req.query.move_to && (!destino || destino.type !== cat.type || destino.id === cat.id)) {
+    return res.status(400).json({ error: 'escolha uma categoria de destino do mesmo tipo' });
+  }
+  const apagarConteudo = bool(req.query.delete_content);
+  if (destino && apagarConteudo) {
+    return res.status(400).json({ error: 'escolha mover o conteudo ou apagar, nao os dois' });
+  }
+
+  const itens = itensDaCategoria(cat);
+  if (itens && !destino && !apagarConteudo) {
+    return res.status(409).json({
+      error: `a categoria tem ${itens} item(ns) - mova o conteudo (move_to) ou apague junto (delete_content)`,
+    });
+  }
+
+  let movidos = 0;
+  let excluidos = 0;
+  tx(() => {
+    if (destino) {
+      run(`UPDATE ${TABLES[cat.type]} SET category_id = ? WHERE category_id = ?`, destino.id, cat.id);
+      movidos = itens;
+    } else if (apagarConteudo) {
+      excluidos = Number(run(`DELETE FROM ${TABLES[cat.type]} WHERE category_id = ?`, cat.id).changes);
+    }
+    run('DELETE FROM categories WHERE id = ?', cat.id);   // bouquet_categories sai por cascade
+  });
+  res.json({ ok: true, movidos, excluidos });
+});
+
 router.get('/bouquets', (req, res) => {
   res.json(all('SELECT * FROM bouquets ORDER BY name').map((b) => ({
     ...b,
@@ -415,18 +507,38 @@ router.delete('/plans/:id', admin, (req, res) => {
 // ----------------------------------------------------------------
 // conteudo
 // ----------------------------------------------------------------
-const TABLES = { live: 'streams', movie: 'movies', series: 'series' };
+
+/** filtro da listagem de conteudo (o mesmo usado na busca da tela) */
+function filtroConteudo(q = {}) {
+  const params = [];
+  let where = 'WHERE 1=1';
+  if (q.search) { where += ' AND t.name LIKE ?'; params.push(`%${q.search}%`); }
+  if (q.category_id) { where += ' AND t.category_id = ?'; params.push(Number(q.category_id)); }
+  if (String(q.enabled) === '0') where += ' AND t.enabled = 0';
+  return { where, params };
+}
+
+/** resolve a categoria de destino informada por id ou por nome novo */
+function categoriaDestino(body, type) {
+  if (body.category_name) {
+    const nome = String(body.category_name).trim();
+    if (!nome) return { erro: 'informe o nome da categoria' };
+    run('INSERT OR IGNORE INTO categories(name,type,sort_order) VALUES(?,?,0)', nome, type);
+    return { id: get('SELECT id FROM categories WHERE name = ? AND type = ?', nome, type).id };
+  }
+  if (body.category_id === null) return { id: null };
+  if (body.category_id === undefined) return {};
+  const cat = get('SELECT * FROM categories WHERE id = ?', Number(body.category_id));
+  if (!cat || cat.type !== type) return { erro: 'categoria de destino invalida para este tipo' };
+  return { id: cat.id };
+}
 
 router.get('/content', (req, res) => {
   const type = String(req.query.type || 'live');
   const table = TABLES[type];
   if (!table) return res.status(400).json({ error: 'tipo invalido' });
 
-  const params = [];
-  let where = 'WHERE 1=1';
-  if (req.query.search) { where += ' AND t.name LIKE ?'; params.push(`%${req.query.search}%`); }
-  if (req.query.category_id) { where += ' AND t.category_id = ?'; params.push(Number(req.query.category_id)); }
-  if (req.query.enabled === '0') where += ' AND t.enabled = 0';
+  const { where, params } = filtroConteudo(req.query);
 
   const limit = Math.min(Number(req.query.limit) || 50, 500);
   const page = Math.max(Number(req.query.page) || 1, 1);
@@ -455,15 +567,54 @@ router.get('/content/:type/:id', (req, res) => {
   res.json(row);
 });
 
+/** troca a categoria de varios itens: os selecionados (ids) ou todos os do filtro (all) */
+router.post('/content/:type/category', admin, (req, res) => {
+  const type = req.params.type;
+  const table = TABLES[type];
+  if (!table) return res.status(400).json({ error: 'tipo invalido' });
+  const b = req.body || {};
+
+  const destino = categoriaDestino(b, type);
+  if (destino.erro) return res.status(400).json({ error: destino.erro });
+  if (destino.id === undefined) return res.status(400).json({ error: 'escolha a categoria de destino' });
+
+  const ids = Array.isArray(b.ids)
+    ? [...new Set(b.ids.map(Number).filter((n) => Number.isInteger(n) && n > 0))]
+    : [];
+  if (!ids.length && !bool(b.all)) return res.status(400).json({ error: 'nenhum item selecionado' });
+
+  let movidos = 0;
+  tx(() => {
+    if (ids.length) {
+      for (let i = 0; i < ids.length; i += 400) {           // sqlite tem limite de parametros por statement
+        const parte = ids.slice(i, i + 400);
+        const r = run(`UPDATE ${table} SET category_id = ? WHERE id IN (${parte.map(() => '?').join(',')})`,
+          destino.id, ...parte);
+        movidos += Number(r.changes);
+      }
+    } else {
+      const { where, params } = filtroConteudo(b.filtro || {});
+      const r = run(`UPDATE ${table} SET category_id = ? WHERE id IN (SELECT t.id FROM ${table} t ${where})`,
+        destino.id, ...params);
+      movidos = Number(r.changes);
+    }
+  });
+  res.json({ ok: true, movidos, category_id: destino.id });
+});
+
 router.patch('/content/:type/:id', admin, (req, res) => {
   const table = TABLES[req.params.type];
   if (!table) return res.status(400).json({ error: 'tipo invalido' });
   const b = req.body || {};
+  // categoria existente, ou criada na hora pelo nome, direto na tela de edicao
+  const destino = categoriaDestino(b, req.params.type);
+  if (destino.erro) return res.status(400).json({ error: destino.erro });
+  const catId = destino.id;
   const fields = [];
   const params = [];
   const setIf = (k, v) => { if (v !== undefined) { fields.push(`${k} = ?`); params.push(v); } };
   setIf('name', b.name);
-  setIf('category_id', b.category_id !== undefined ? Number(b.category_id) : undefined);
+  setIf('category_id', catId);
   setIf('logo', b.logo);
   setIf('enabled', b.enabled !== undefined ? (bool(b.enabled) ? 1 : 0) : undefined);
   if (table !== 'series') {
@@ -556,6 +707,32 @@ router.get('/activity', (req, res) => {
 // ----------------------------------------------------------------
 router.get('/import/status', admin, (req, res) => res.json(importState));
 
+/** o painel envia o arquivo anexado no corpo cru da requisicao */
+const listaAnexada = express.raw({ type: () => true, limit: `${config.importMaxMb}mb` });
+
+/** playlists costumam vir em utf-8, mas ainda aparece muita lista em latin1 */
+function decodeLista(buf) {
+  const utf8 = buf.toString('utf8');
+  return utf8.includes('\uFFFD') ? buf.toString('latin1') : utf8;
+}
+
+router.post('/import/upload', admin, listaAnexada, (req, res) => {
+  if (importState.running) return res.status(409).json({ error: 'ja existe uma importacao em andamento' });
+  if (!Buffer.isBuffer(req.body) || !req.body.length) {
+    return res.status(400).json({ error: 'nenhum arquivo recebido' });
+  }
+  const content = decodeLista(req.body);
+  if (!/#EXTM3U|#EXTINF/i.test(content)) {
+    return res.status(400).json({ error: 'o arquivo enviado nao parece ser uma lista M3U' });
+  }
+  try {
+    const result = importM3U(content, { reset: bool(req.query.reset), prune: bool(req.query.prune) });
+    setSetting('last_import', String(now()));
+    setSetting('last_import_source', req.query.name ? `arquivo: ${String(req.query.name)}` : 'arquivo anexado');
+    res.json(result);
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
 router.post('/import', admin, async (req, res) => {
   if (importState.running) return res.status(409).json({ error: 'ja existe uma importacao em andamento' });
   const b = req.body || {};
@@ -564,16 +741,140 @@ router.post('/import', admin, async (req, res) => {
     let result;
     if (b.url) result = await importFromUrl(String(b.url), opts);
     else if (b.content) result = importM3U(String(b.content), opts);
-    else {
-      const file = b.path ? String(b.path) : config.m3uPath;
-      if (!fs.existsSync(file)) return res.status(400).json({ error: `arquivo nao encontrado: ${file}` });
-      result = importFromFile(file, opts);
+    else return res.status(400).json({ error: 'envie um arquivo, uma URL ou o conteudo da lista' });
+
+    if (b.url) {
+      setSetting('m3u_source_url', String(b.url));
+      setSetting('last_import_source', String(b.url));
+    } else {
+      setSetting('last_import_source', 'conteudo colado no painel');
     }
-    if (b.url) setSetting('m3u_source_url', String(b.url));
     setSetting('last_import', String(now()));
     res.json(result);
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
+
+// ----------------------------------------------------------------
+// exportacao da lista organizada (somente admin)
+// ----------------------------------------------------------------
+const pad2 = (n) => String(n ?? 1).padStart(2, '0');
+const attr = (v) => String(v ?? '').replace(/"/g, "'");
+
+/** nome que faz o episodio voltar como serie/temporada/episodio numa reimportacao */
+const nomeEpisodio = (e) =>
+  (/S\d{1,3}\s*[\sEx]\s*E?\d{1,4}\s*$/i.test(e.name)
+    ? e.name
+    : `${e.sname} S${pad2(e.season)} E${pad2(e.episode)}`);
+
+/** filtro comum da exportacao */
+function filtroExport(q = {}) {
+  const tipo = TIPOS.includes(String(q.type)) ? String(q.type) : 'all';
+  const ativos = q.only_enabled === undefined ? true : bool(q.only_enabled);
+  const cond = (alias) => {
+    const params = [];
+    let sql = '';
+    if (ativos) sql += ` AND ${alias}.enabled = 1`;
+    if (q.category_id) { sql += ` AND ${alias}.category_id = ?`; params.push(Number(q.category_id)); }
+    if (q.search) { sql += ` AND ${alias}.name LIKE ?`; params.push(`%${q.search}%`); }
+    return { sql, params };
+  };
+  return { tipo, cond };
+}
+
+/** conteudo do painel na mesma ordem em que aparece no player */
+function* itensExport(q = {}) {
+  const { tipo, cond } = filtroExport(q);
+
+  if (tipo === 'all' || tipo === 'live') {
+    const f = cond('s');
+    for (const s of all(
+      `SELECT s.*, c.name AS cat FROM streams s LEFT JOIN categories c ON c.id = s.category_id
+        WHERE 1=1 ${f.sql} ORDER BY s.sort_order, s.name`, ...f.params)) {
+      yield { tipo: 'canal', id: s.id, name: s.name, group: s.cat || 'Canais',
+              logo: s.logo, epgId: s.epg_id, url: s.source_url, duration: null, enabled: s.enabled };
+    }
+  }
+  if (tipo === 'all' || tipo === 'movie') {
+    const f = cond('m');
+    for (const m of all(
+      `SELECT m.*, c.name AS cat FROM movies m LEFT JOIN categories c ON c.id = m.category_id
+        WHERE 1=1 ${f.sql} ORDER BY m.name`, ...f.params)) {
+      yield { tipo: 'filme', id: m.id, name: m.name, group: m.cat || 'Filmes',
+              logo: m.logo, epgId: null, url: m.source_url, duration: m.duration, enabled: m.enabled };
+    }
+  }
+  if (tipo === 'all' || tipo === 'series') {
+    const f = cond('s');   // o filtro vale para a serie, os episodios vem junto
+    for (const e of all(
+      `SELECT e.*, s.name AS sname, s.enabled AS senabled, c.name AS cat FROM episodes e
+         JOIN series s ON s.id = e.series_id
+         LEFT JOIN categories c ON c.id = s.category_id
+        WHERE 1=1 ${f.sql} ORDER BY s.name, e.season, e.episode`, ...f.params)) {
+      yield { tipo: 'episodio', id: e.id, name: nomeEpisodio(e), group: e.cat || 'Series',
+              logo: e.logo, epgId: null, url: e.source_url, duration: e.duration, enabled: e.senabled };
+    }
+  }
+}
+
+/** quantos itens a exportacao vai gerar (o painel mostra antes de baixar) */
+router.get('/export/resumo', admin, (req, res) => {
+  const { tipo, cond } = filtroExport(req.query);
+  const conta = (t, table, alias) => {
+    if (tipo !== 'all' && tipo !== t) return 0;
+    const f = cond(alias);
+    return get(`SELECT COUNT(*) AS n FROM ${table} ${alias} WHERE 1=1 ${f.sql}`, ...f.params).n;
+  };
+  const live = conta('live', 'streams', 's');
+  const movie = conta('movie', 'movies', 'm');
+  let series = 0;
+  if (tipo === 'all' || tipo === 'series') {
+    const f = cond('s');
+    series = get(`SELECT COUNT(*) AS n FROM episodes e JOIN series s ON s.id = e.series_id
+                   WHERE 1=1 ${f.sql}`, ...f.params).n;
+  }
+  res.json({ live, movie, series, total: live + movie + series });
+});
+
+const nomeExport = (q, ext) => {
+  const tipo = TIPOS.includes(String(q.type)) ? String(q.type) : 'tudo';
+  return `lista-${tipo}-${new Date().toISOString().slice(0, 10)}.${ext}`;
+};
+
+router.get('/export/m3u', admin, (req, res) => {
+  res.setHeader('Content-Type', 'audio/x-mpegurl; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="${nomeExport(req.query, 'm3u')}"`);
+  res.write('#EXTM3U\n');
+  let n = 0;
+  for (const it of itensExport(req.query)) {
+    res.write(`#EXTINF:${it.duration || -1} tvg-id="${attr(it.epgId)}" tvg-name="${attr(it.name)}" ` +
+              `tvg-logo="${attr(it.logo)}" group-title="${attr(it.group)}",${it.name}\n`);
+    res.write(`${it.url}\n`);
+    n++;
+  }
+  res.end(`# ${n} item(ns) exportados pelo painel em ${new Date().toISOString()}\n`);
+});
+
+const csv = (v) => {
+  const t = String(v ?? '');
+  return /[;"\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t;
+};
+
+router.get('/export/csv', admin, (req, res) => {
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="${nomeExport(req.query, 'csv')}"`);
+  res.write('\uFEFF');                    // BOM: o Excel abre os acentos certo
+  res.write('tipo;id;nome;categoria;status;url;logo;tvg_id\n');
+  for (const it of itensExport(req.query)) {
+    res.write([it.tipo, it.id, it.name, it.group, it.enabled ? 'ativo' : 'oculto',
+               it.url, it.logo, it.epgId].map(csv).join(';') + '\n');
+  }
+  res.end();
+});
+
+// ----------------------------------------------------------------
+// maquina onde o painel roda (somente admin)
+// ----------------------------------------------------------------
+router.get('/system', admin, (req, res) => res.json(systemStats()));
 
 // ----------------------------------------------------------------
 // configuracoes
@@ -585,7 +886,7 @@ router.get('/settings', admin, (req, res) => {
     trialHours: config.trialHours,
     connectionTtl: config.connectionTtl,
     port: config.port,
-    m3uPath: config.m3uPath,
+    importMaxMb: config.importMaxMb,
     db: Object.fromEntries(all('SELECT key, value FROM settings').map((r) => [r.key, r.value])),
   });
 });
@@ -593,6 +894,15 @@ router.get('/settings', admin, (req, res) => {
 router.put('/settings', admin, (req, res) => {
   for (const [k, v] of Object.entries(req.body || {})) setSetting(k, v);
   res.json({ ok: true });
+});
+
+// corpo grande demais (lista anexada ou texto colado) -> resposta em json
+router.use((err, req, res, next) => {
+  if (err?.type === 'entity.too.large') {
+    const mb = Math.round((err.limit || 0) / (1024 * 1024)) || config.importMaxMb;
+    return res.status(413).json({ error: `conteudo maior que o limite de ${mb} MB` });
+  }
+  next(err);
 });
 
 export default router;

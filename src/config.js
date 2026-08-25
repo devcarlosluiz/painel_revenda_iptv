@@ -24,6 +24,7 @@ export const config = {
   trialHours:     num(process.env.TRIAL_HOURS, 6),
   dbPath:         path.resolve(ROOT, process.env.DB_PATH || './data/panel.db'),
   m3uPath:        path.resolve(ROOT, process.env.M3U_PATH || './lista.m3u'),
+  importMaxMb:    num(process.env.IMPORT_MAX_MB, 200),
 };
 
 export default config;

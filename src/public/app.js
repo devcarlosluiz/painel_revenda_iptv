@@ -7,6 +7,7 @@ const S = {
   publicUrl: location.origin,
   page: 'dashboard',
   cache: {},
+  timer: null,          // atualizacao automatica da tela atual
 };
 
 // ---------------- utilidades ----------------
@@ -35,6 +36,27 @@ function paraInputData(ts) {
 }
 const deInputData = (v) => (v ? Math.floor(new Date(v).getTime() / 1000) : null);
 
+const fmtNum = (v) => Number(v || 0).toLocaleString('pt-BR');
+
+function fmtTamanho(bytes) {
+  const un = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let v = Number(bytes) || 0;
+  let i = 0;
+  while (v >= 1024 && i < un.length - 1) { v /= 1024; i++; }
+  return `${i === 0 ? v : v.toFixed(1)} ${un[i]}`;
+}
+
+function fmtDuracao(seg) {
+  const s = Math.max(0, Math.round(Number(seg) || 0));
+  const d = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (d) return `${d}d ${h}h`;
+  if (h) return `${h}h ${m}min`;
+  if (m) return `${m}min`;
+  return `${s}s`;
+}
+
 function toast(msg, tipo = '') {
   const t = document.createElement('div');
   t.className = `toast ${tipo}`;
@@ -61,6 +83,27 @@ async function api(path, opts = {}) {
   const data = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(data.error || `erro ${r.status}`);
   return data;
+}
+
+/** Envia o arquivo anexado no corpo cru da requisicao, com progresso de upload. */
+function enviarArquivo(path, file, params = {}, onProgress) {
+  return new Promise((resolve, reject) => {
+    const qs = new URLSearchParams(params).toString();
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', `/api${path}${qs ? `?${qs}` : ''}`);
+    xhr.setRequestHeader('authorization', `Bearer ${S.token}`);
+    xhr.setRequestHeader('content-type', 'application/octet-stream');
+    xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress?.(e.loaded / e.total); };
+    xhr.onerror = () => reject(new Error('falha de rede ao enviar o arquivo'));
+    xhr.onload = () => {
+      let data = {};
+      try { data = JSON.parse(xhr.responseText); } catch { /* resposta sem json */ }
+      if (xhr.status === 401) { sair(); return reject(new Error('sessao expirada')); }
+      if (xhr.status < 200 || xhr.status >= 300) return reject(new Error(data.error || `erro ${xhr.status}`));
+      resolve(data);
+    };
+    xhr.send(file);
+  });
 }
 
 // ---------------- modal ----------------
@@ -143,8 +186,9 @@ const MENU = [
   { id: 'planos',       ic: '🏷️', nome: 'Planos', admin: true },
   { id: 'pacotes',      ic: '📦', nome: 'Pacotes', admin: true },
   { sec: 'Conteúdo' },
-  { id: 'conteudo', ic: '🎬', nome: 'Canais e filmes', admin: true },
-  { id: 'importar', ic: '⬇️', nome: 'Importar lista', admin: true },
+  { id: 'conteudo',   ic: '🎬', nome: 'Canais e filmes', admin: true },
+  { id: 'categorias', ic: '🗂️', nome: 'Categorias', admin: true },
+  { id: 'importar',   ic: '⬇️', nome: 'Importar / exportar', admin: true },
   { id: 'config',   ic: '⚙️', nome: 'Configurações', admin: true },
 ];
 
@@ -162,6 +206,7 @@ function marcarMenu() {
 }
 
 async function ir(page) {
+  if (S.timer) { clearInterval(S.timer); S.timer = null; }
   S.page = page;
   location.hash = page;
   marcarMenu();
@@ -240,8 +285,65 @@ PAGES.dashboard = async () => {
         <div class="stat"><div class="n">${d.conteudo.episodios}</div><div class="l">🎞️ Episódios</div></div>
         <div class="stat"><div class="n">${d.conteudo.categorias}</div><div class="l">🗂️ Categorias</div></div>
       </div>
-    </div>`;
+    </div>
+
+    ${S.user.role === 'admin' ? `
+      <div class="panel">
+        <div class="ph"><b>Servidor</b>
+          <span id="svQuando" style="color:var(--dim2);font-size:11.5px"></span></div>
+        <div class="pb" id="svCorpo"><div class="empty">lendo a máquina...</div></div>
+      </div>` : ''}`;
+
+  if (S.user.role === 'admin') {
+    await atualizarServidor();
+    if (S.timer) clearInterval(S.timer);          // nunca deixa dois relogios rodando
+    S.timer = setInterval(() => {
+      if (!$('#svCorpo')) { clearInterval(S.timer); S.timer = null; return; }
+      atualizarServidor().catch(() => {});
+    }, 5000);
+  }
 };
+
+/** estado da máquina onde o painel roda; recarrega sozinho a cada 5s */
+async function atualizarServidor() {
+  if (!$('#svCorpo')) return;
+  const s = await api('/system');
+  if (!$('#svCorpo')) return;                       // saiu da tela enquanto carregava
+
+  const nivel = (p) => (p >= 85 ? ' err' : p >= 60 ? ' warn' : '');
+  const barra = (p, estilo = '') =>
+    `<div class="gauge${nivel(p)}" style="${estilo}"><i style="width:${Math.min(100, Math.max(0, p || 0))}%"></i></div>`;
+  const info = (rot, val) => `<div class="sysinfo"><label>${rot}</label><div>${esc(val)}</div></div>`;
+  const pct = (v) => (v === null || v === undefined ? '—' : `${v}%`);
+
+  $('#svCorpo').innerHTML = `
+    <div class="cards" style="margin:0 0 14px">
+      <div class="stat"><div class="n">${pct(s.cpu.pct)}</div>
+        <div class="l">🧠 CPU · ${s.cpu.nucleos} núcleo(s)</div>${barra(s.cpu.pct)}</div>
+      <div class="stat"><div class="n">${pct(s.memoria.pct)}</div>
+        <div class="l">💾 RAM · ${fmtTamanho(s.memoria.usado)} de ${fmtTamanho(s.memoria.total)}</div>
+        ${barra(s.memoria.pct)}</div>
+      ${s.disco ? `<div class="stat"><div class="n">${pct(s.disco.pct)}</div>
+        <div class="l">🗄️ Disco · ${fmtTamanho(s.disco.livre)} livres</div>${barra(s.disco.pct)}</div>` : ''}
+      <div class="stat"><div class="n">${pct(s.cpu.processo)}</div>
+        <div class="l">⚙️ Painel · de 1 núcleo · ${fmtTamanho(s.processo.rss)} de RAM</div></div>
+    </div>
+
+    ${s.cpu.cores.length > 1 ? `
+      <div class="cores">
+        ${s.cpu.cores.map((p, i) => `<span title="núcleo ${i + 1}: ${p}%">${barra(p, 'margin:0')}</span>`).join('')}
+      </div>` : ''}
+
+    <div class="grid3">
+      ${info('Processador', s.cpu.modelo + (s.cpu.velocidade ? ` · ${s.cpu.velocidade} MHz` : ''))}
+      ${info('Carga (1 / 5 / 15 min)', s.cpu.carga ? s.cpu.carga.join('  ·  ') : 'só no Linux')}
+      ${info('Sistema', `${s.host.plataforma} (${s.host.arch})`)}
+      ${info('Máquina ligada há', fmtDuracao(s.host.uptime))}
+      ${info('Painel no ar há', `${fmtDuracao(s.processo.uptime)} · pid ${s.processo.pid}`)}
+      ${info('Node e banco', `${s.host.node} · banco com ${fmtTamanho(s.banco)}`)}
+    </div>`;
+  $('#svQuando').textContent = `atualizado às ${new Date().toLocaleTimeString('pt-BR')} · host ${s.host.hostname}`;
+}
 
 // ---------------- clientes ----------------
 S.cache.linhas = { page: 1, search: '', status: '' };
@@ -916,7 +1018,8 @@ const excluirPacote = (id, nome) => confirmar(`Excluir o pacote "${nome}"?`, asy
 });
 
 // ---------------- conteudo ----------------
-S.cache.cont = { type: 'live', page: 1, search: '', category_id: '' };
+const filtroConteudo = (type) => ({ type, page: 1, search: '', category_id: '', total: 0, sel: new Set() });
+S.cache.cont = filtroConteudo('live');
 
 PAGES.conteudo = async () => {
   const f = S.cache.cont;
@@ -926,6 +1029,10 @@ PAGES.conteudo = async () => {
   const r = await api(`/content?${qs}`);
   const totalPag = Math.max(1, Math.ceil(r.total / r.limit));
   const isSerie = f.type === 'series';
+
+  f.total = r.total;
+  const sel = f.sel instanceof Set ? f.sel : (f.sel = new Set());
+  const marcados = r.data.length > 0 && r.data.every((x) => sel.has(x.id));
 
   $('#view').innerHTML = `
     <div class="head">
@@ -947,12 +1054,21 @@ PAGES.conteudo = async () => {
           ${cats.map((c) => `<option value="${c.id}" ${String(f.category_id) === String(c.id) ? 'selected' : ''}>${esc(c.name)} (${c.itens})</option>`).join('')}
         </select>
       </div>
+      <div class="bulk" id="cBulk" ${sel.size ? '' : 'hidden'}>
+        <b id="cBulkN">${sel.size} selecionado(s)</b>
+        <button class="btn sm pri" onclick="app.moverSelecionados()">🗂️ Mudar categoria</button>
+        <button class="btn sm" onclick="app.limparSelecao()">limpar seleção</button>
+        <span style="color:var(--dim2);font-size:12px">a seleção continua ao trocar de página</span>
+      </div>
       <table>
-        <thead><tr><th style="width:44px"></th><th>Nome</th><th>Categoria</th>
+        <thead><tr><th style="width:34px"><input type="checkbox" id="cAll" ${marcados ? 'checked' : ''}
+            title="marcar os itens desta página"></th>
+          <th style="width:44px"></th><th>Nome</th><th>Categoria</th>
           ${isSerie ? '<th>Episódios</th>' : '<th>Fonte</th>'}<th>Status</th><th style="text-align:right"></th></tr></thead>
         <tbody>
           ${r.data.length ? r.data.map((x) => `
             <tr>
+              <td><input type="checkbox" class="cSel" value="${x.id}" ${sel.has(x.id) ? 'checked' : ''}></td>
               <td>${x.logo ? `<img src="${esc(x.logo)}" style="width:32px;height:32px;object-fit:contain;border-radius:5px;background:#0b0f14" onerror="this.style.visibility='hidden'">` : ''}</td>
               <td><b>${esc(x.name)}</b></td>
               <td style="color:var(--dim)">${esc(x.categoria || '-')}</td>
@@ -962,9 +1078,9 @@ PAGES.conteudo = async () => {
               <td style="text-align:right;white-space:nowrap">
                 ${!isSerie ? `<button class="btn sm" onclick="app.testarFonte('${f.type}',${x.id},this)">testar</button>` : ''}
                 <button class="btn sm" onclick="app.alternarConteudo('${f.type}',${x.id},${x.enabled ? 0 : 1})">${x.enabled ? 'ocultar' : 'ativar'}</button>
-                ${!isSerie ? `<button class="btn sm" onclick="app.editarConteudo('${f.type}',${x.id})">✏️</button>` : ''}
+                <button class="btn sm" onclick="app.editarConteudo('${f.type}',${x.id})">✏️</button>
               </td>
-            </tr>`).join('') : '<tr><td colspan="6" class="empty">nada encontrado</td></tr>'}
+            </tr>`).join('') : '<tr><td colspan="7" class="empty">nada encontrado</td></tr>'}
         </tbody>
       </table>
       <div class="pager">
@@ -979,8 +1095,65 @@ PAGES.conteudo = async () => {
   let t;
   $('#cSearch').oninput = (e) => { clearTimeout(t); t = setTimeout(() => { f.search = e.target.value; f.page = 1; ir('conteudo'); }, 350); };
   $('#cCat').onchange = (e) => { f.category_id = e.target.value; f.page = 1; ir('conteudo'); };
+
+  // ---- selecao em lote ----
+  const atualizarBarra = () => {
+    $('#cBulk').hidden = !sel.size;
+    $('#cBulkN').textContent = `${sel.size} selecionado(s)`;
+  };
+  const caixas = [...document.querySelectorAll('.cSel')];
+  caixas.forEach((cb) => {
+    cb.onchange = () => {
+      if (cb.checked) sel.add(Number(cb.value)); else sel.delete(Number(cb.value));
+      $('#cAll').checked = caixas.length > 0 && caixas.every((c) => c.checked);
+      atualizarBarra();
+    };
+  });
+  $('#cAll').onchange = (e) => {
+    caixas.forEach((cb) => {
+      cb.checked = e.target.checked;
+      if (cb.checked) sel.add(Number(cb.value)); else sel.delete(Number(cb.value));
+    });
+    atualizarBarra();
+  };
 };
-const abaConteudo = (t) => { S.cache.cont = { type: t, page: 1, search: '', category_id: '' }; ir('conteudo'); };
+const abaConteudo = (t) => { S.cache.cont = filtroConteudo(t); ir('conteudo'); };
+const limparSelecao = () => { S.cache.cont.sel.clear(); ir('conteudo'); };
+
+/** troca a categoria dos itens marcados (ou de todo o filtro) de uma vez */
+function moverSelecionados() {
+  const f = S.cache.cont;
+  if (!f.sel.size) return toast('marque pelo menos um item', 'err');
+  const podeFiltro = f.total > f.sel.size;
+  modal({
+    titulo: `Mudar categoria de ${f.sel.size} item(ns)`,
+    corpo: `
+      ${campoCategoria(f.type)}
+      ${podeFiltro ? `<label class="chk"><input type="checkbox" id="mvTodos">
+          aplicar aos ${f.total} itens do filtro atual, não só aos ${f.sel.size} marcados</label>` : ''}
+      <div class="help">Nome, ID e URL de origem não mudam — só a categoria, então o cliente não perde favoritos.</div>`,
+    rodape: `<button class="btn" onclick="app.fecharModal()">Cancelar</button>
+             <button class="btn pri" id="mvOk">Mover</button>`,
+  });
+  ligarCampoCategoria();
+  $('#mvOk').onclick = async () => {
+    const btn = $('#mvOk');
+    try {
+      const todos = podeFiltro && $('#mvTodos').checked;
+      const body = {
+        ...corpoCategoria(),
+        ...(todos ? { all: true, filtro: { search: f.search, category_id: f.category_id } } : { ids: [...f.sel] }),
+      };
+      btn.disabled = true; btn.innerHTML = '<span class="spin"></span> movendo...';
+      const r = await api(`/content/${f.type}/category`, { method: 'POST', body: JSON.stringify(body) });
+      fecharModal(); toast(`${r.movidos} item(ns) movido(s)`, 'ok');
+      f.sel.clear(); S.cache.categorias = null; ir('conteudo');
+    } catch (e) {
+      btn.disabled = false; btn.textContent = 'Mover';
+      toast(e.message, 'err');
+    }
+  };
+}
 const pagConteudo = (p) => { S.cache.cont.page = p; ir('conteudo'); };
 
 const alternarConteudo = async (type, id, enabled) => {
@@ -998,23 +1171,56 @@ async function testarFonte(type, id, btn) {
   setTimeout(() => (btn.textContent = antes), 4000);
 }
 
+/** select de categoria com a opcao de criar uma nova na hora */
+function campoCategoria(type, atual = null) {
+  const cats = (S.cache.categorias || []).filter((c) => c.type === type);
+  return `<div class="field"><label>Categoria</label>
+      <select class="inp" id="ctCat">
+        <option value="" ${atual ? '' : 'selected'}>— sem categoria —</option>
+        ${cats.map((c) => `<option value="${c.id}" ${c.id === atual ? 'selected' : ''}>${esc(c.name)} (${c.itens})</option>`).join('')}
+        <option value="nova">＋ criar nova categoria</option>
+      </select>
+      <input class="inp" id="ctCatNova" placeholder="nome da nova categoria" style="margin-top:6px;display:none"></div>`;
+}
+
+/** liga o input de nome novo ao select; chame depois de montar o modal */
+function ligarCampoCategoria() {
+  const sel = $('#ctCat');
+  const novo = $('#ctCatNova');
+  sel.onchange = () => {
+    novo.style.display = sel.value === 'nova' ? '' : 'none';
+    if (sel.value === 'nova') novo.focus();
+  };
+}
+
+/** parte do corpo do PATCH/POST que descreve a categoria escolhida */
+function corpoCategoria() {
+  const v = $('#ctCat').value;
+  if (v === 'nova') {
+    const nome = $('#ctCatNova').value.trim();
+    if (!nome) throw new Error('informe o nome da nova categoria');
+    return { category_name: nome };
+  }
+  return { category_id: v === '' ? null : Number(v) };
+}
+
 async function editarConteudo(type, id) {
   const x = await api(`/content/${type}/${id}`);
-  const cats = (S.cache.categorias || []).filter((c) => c.type === type);
+  if (!S.cache.categorias) S.cache.categorias = await api('/categories');
+  const isSerie = type === 'series';
   modal({
     titulo: `Editar: ${x.name}`,
     corpo: `
       <div class="field"><label>Nome</label><input class="inp" id="ctNome" value="${esc(x.name)}"></div>
-      <div class="field"><label>URL da fonte</label><input class="inp mono" id="ctUrl" value="${esc(x.source_url)}"></div>
+      ${isSerie ? '' : `<div class="field"><label>URL da fonte</label><input class="inp mono" id="ctUrl" value="${esc(x.source_url)}"></div>`}
       <div class="grid2">
-        <div class="field"><label>Categoria</label>
-          <select class="inp" id="ctCat">${cats.map((c) => `<option value="${c.id}" ${c.id === x.category_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></div>
-        <div class="field"><label>Entrega</label>
+        ${campoCategoria(type, x.category_id)}
+        ${isSerie ? '' : `<div class="field"><label>Entrega</label>
           <select class="inp" id="ctProxy">
             <option value="">padrão do servidor</option>
             <option value="0" ${x.proxy_mode === 0 ? 'selected' : ''}>redirect (não gasta banda)</option>
             <option value="1" ${x.proxy_mode === 1 ? 'selected' : ''}>proxy (esconde a fonte)</option>
-          </select></div>
+          </select></div>`}
       </div>
       ${type === 'live' ? `<div class="field"><label>ID do EPG (tvg-id)</label><input class="inp mono" id="ctEpg" value="${esc(x.epg_id || '')}"></div>` : ''}
       <div class="field"><label>Logo</label><input class="inp mono" id="ctLogo" value="${esc(x.logo || '')}"></div>`,
@@ -1022,17 +1228,20 @@ async function editarConteudo(type, id) {
              <button class="btn" onclick="app.fecharModal()">Cancelar</button>
              <button class="btn pri" id="ctOk">Salvar</button>`,
   });
+  ligarCampoCategoria();
   $('#ctOk').onclick = async () => {
-    const proxy = $('#ctProxy').value;
-    await api(`/content/${type}/${id}`, {
-      method: 'PATCH',
-      body: JSON.stringify({
-        name: $('#ctNome').value, source_url: $('#ctUrl').value, category_id: Number($('#ctCat').value),
-        logo: $('#ctLogo').value, proxy_mode: proxy === '' ? null : Number(proxy),
-        ...(type === 'live' ? { epg_id: $('#ctEpg').value } : {}),
-      }),
-    });
-    fecharModal(); toast('salvo', 'ok'); ir('conteudo');
+    try {
+      const proxy = isSerie ? '' : $('#ctProxy').value;
+      await api(`/content/${type}/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          name: $('#ctNome').value, logo: $('#ctLogo').value, ...corpoCategoria(),
+          ...(isSerie ? {} : { source_url: $('#ctUrl').value, proxy_mode: proxy === '' ? null : Number(proxy) }),
+          ...(type === 'live' ? { epg_id: $('#ctEpg').value } : {}),
+        }),
+      });
+      fecharModal(); toast('salvo', 'ok'); S.cache.categorias = null; ir('conteudo');
+    } catch (e) { toast(e.message, 'err'); }
   };
 }
 const excluirConteudo = (type, id) => confirmar('Excluir este item do painel?', async () => {
@@ -1040,31 +1249,25 @@ const excluirConteudo = (type, id) => confirmar('Excluir este item do painel?', 
 });
 
 function novoCanal() {
-  const cats = (S.cache.categorias || []).filter((c) => c.type === 'live');
   modal({
     titulo: 'Novo canal manual',
     corpo: `
       <div class="field"><label>Nome</label><input class="inp" id="ncNome"></div>
       <div class="field"><label>URL da fonte (.ts, .m3u8)</label><input class="inp mono" id="ncUrl"></div>
-      <div class="grid2">
-        <div class="field"><label>Categoria existente</label>
-          <select class="inp" id="ncCat"><option value="">— criar nova —</option>
-            ${cats.map((c) => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select></div>
-        <div class="field"><label>Ou nome da nova categoria</label><input class="inp" id="ncCatNova"></div>
-      </div>
+      ${campoCategoria('live')}
       <div class="grid2">
         <div class="field"><label>Logo (url)</label><input class="inp mono" id="ncLogo"></div>
         <div class="field"><label>tvg-id (EPG)</label><input class="inp mono" id="ncEpg"></div>
       </div>`,
     rodape: `<button class="btn" onclick="app.fecharModal()">Cancelar</button><button class="btn pri" id="ncOk">Adicionar</button>`,
   });
+  ligarCampoCategoria();
   $('#ncOk').onclick = async () => {
     try {
       await api('/content/live', {
         method: 'POST',
         body: JSON.stringify({
-          name: $('#ncNome').value.trim(), source_url: $('#ncUrl').value.trim(),
-          category_id: $('#ncCat').value || null, category_name: $('#ncCatNova').value.trim() || null,
+          name: $('#ncNome').value.trim(), source_url: $('#ncUrl').value.trim(), ...corpoCategoria(),
           logo: $('#ncLogo').value.trim(), epg_id: $('#ncEpg').value.trim(),
         }),
       });
@@ -1073,18 +1276,250 @@ function novoCanal() {
   };
 }
 
+// ---------------- categorias ----------------
+S.cache.cat = { type: 'live', search: '' };
+
+const TIPOS_CAT = [['live', '📺 Canais'], ['movie', '🎬 Filmes'], ['series', '📼 Séries']];
+const nomeTipo = (t) => (TIPOS_CAT.find(([v]) => v === t) || [, t])[1];
+
+PAGES.categorias = async () => {
+  const f = S.cache.cat;
+  const todas = await api('/categories');
+  S.cache.categorias = todas;
+  const busca = f.search.trim().toLowerCase();
+  const lista = todas.filter((c) => c.type === f.type && c.name.toLowerCase().includes(busca));
+  const itens = lista.reduce((n, c) => n + c.itens, 0);
+
+  $('#view').innerHTML = `
+    <div class="head">
+      <div><h2>Categorias</h2>
+        <div class="sub">renomeie, reordene, junte ou crie as categorias que o cliente ve no player</div></div>
+      <button class="btn pri" onclick="app.novaCategoria()">+ Nova categoria</button>
+    </div>
+    <div class="tabs">
+      ${TIPOS_CAT.map(([v, n]) => `<div class="${f.type === v ? 'active' : ''}" onclick="app.abaCategoria('${v}')">
+        ${n} (${todas.filter((c) => c.type === v).length})</div>`).join('')}
+    </div>
+    <div class="panel">
+      <div class="ph">
+        <input class="inp" id="catBusca" placeholder="buscar categoria..." value="${esc(f.search)}" style="max-width:280px">
+        <span style="color:var(--dim);font-size:12.5px">${lista.length} categoria(s) · ${itens} item(ns)</span>
+      </div>
+      <table>
+        <thead><tr><th>Categoria</th><th style="width:120px">Itens</th><th style="width:90px">Ordem</th>
+          <th style="text-align:right"></th></tr></thead>
+        <tbody>
+          ${lista.length ? lista.map((c) => `
+            <tr>
+              <td><b>${esc(c.name)}</b></td>
+              <td>${c.itens
+                ? `<a onclick="app.verConteudoCategoria('${c.type}',${c.id})" style="cursor:pointer">${c.itens} item(ns)</a>`
+                : '<span style="color:var(--dim2)">vazia</span>'}</td>
+              <td style="color:var(--dim)">${c.sort_order}</td>
+              <td style="text-align:right;white-space:nowrap">
+                <button class="btn sm" onclick="app.editarCategoria(${c.id})">✏️ editar</button>
+                ${c.itens ? `<button class="btn sm" onclick="app.moverCategoria(${c.id})">➡️ mover itens</button>` : ''}
+                <button class="btn sm err" onclick="app.excluirCategoria(${c.id})">🗑️</button>
+              </td>
+            </tr>`).join('') : '<tr><td colspan="4" class="empty">nenhuma categoria neste tipo</td></tr>'}
+        </tbody>
+      </table>
+      <div class="pb" style="padding-top:0">
+        <div class="help">Cliente com pacote marcado só enxerga as categorias que estão no pacote dele —
+          ao criar uma categoria nova, marque ela em <b>Pacotes</b>. Cliente sem pacote vê tudo.</div>
+      </div>
+    </div>`;
+
+  let t;
+  $('#catBusca').oninput = (e) => {
+    clearTimeout(t);
+    t = setTimeout(() => { f.search = e.target.value; ir('categorias'); }, 300);
+  };
+};
+
+const abaCategoria = (t) => { S.cache.cat = { type: t, search: '' }; ir('categorias'); };
+const verConteudoCategoria = (type, id) => {
+  S.cache.cont = { ...filtroConteudo(type), category_id: String(id) };
+  ir('conteudo');
+};
+
+const acharCategoria = (id) => (S.cache.categorias || []).find((c) => c.id === id);
+
+/** select com as outras categorias do mesmo tipo (destino de mover/juntar) */
+const opcoesDestino = (cat) => (S.cache.categorias || [])
+  .filter((c) => c.type === cat.type && c.id !== cat.id)
+  .map((c) => `<option value="${c.id}">${esc(c.name)} (${c.itens})</option>`).join('');
+
+function novaCategoria() {
+  const tipo = S.cache.cat?.type || 'live';
+  modal({
+    titulo: 'Nova categoria',
+    corpo: `
+      <div class="field"><label>Nome</label><input class="inp" id="caNome" placeholder="Ex.: Esportes HD"></div>
+      <div class="grid2">
+        <div class="field"><label>Tipo</label>
+          <select class="inp" id="caTipo">
+            ${TIPOS_CAT.map(([v, n]) => `<option value="${v}" ${v === tipo ? 'selected' : ''}>${n}</option>`).join('')}
+          </select></div>
+        <div class="field"><label>Ordem</label><input class="inp" id="caOrdem" type="number" value="0"></div>
+      </div>
+      <div class="help">A ordem define a posição da categoria na lista do player (menor aparece primeiro).
+        Categorias novas começam vazias — mande conteúdo para elas em <b>Conteúdo → editar</b>.</div>`,
+    rodape: `<button class="btn" onclick="app.fecharModal()">Cancelar</button>
+             <button class="btn pri" id="caOk">Criar</button>`,
+  });
+  $('#caOk').onclick = async () => {
+    try {
+      const c = await api('/categories', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: $('#caNome').value.trim(), type: $('#caTipo').value, sort_order: Number($('#caOrdem').value) || 0,
+        }),
+      });
+      fecharModal(); toast('categoria criada', 'ok');
+      S.cache.cat = { type: c.type, search: '' };
+      ir('categorias');
+    } catch (e) { toast(e.message, 'err'); }
+  };
+}
+
+function editarCategoria(id) {
+  const c = acharCategoria(id);
+  if (!c) return;
+  modal({
+    titulo: `Editar categoria: ${c.name}`,
+    corpo: `
+      <div class="field"><label>Nome</label><input class="inp" id="caNome" value="${esc(c.name)}"></div>
+      <div class="grid2">
+        <div class="field"><label>Tipo</label>
+          <select class="inp" id="caTipo" ${c.itens ? 'disabled' : ''}>
+            ${TIPOS_CAT.map(([v, n]) => `<option value="${v}" ${v === c.type ? 'selected' : ''}>${n}</option>`).join('')}
+          </select></div>
+        <div class="field"><label>Ordem</label><input class="inp" id="caOrdem" type="number" value="${c.sort_order}"></div>
+      </div>
+      <div class="help">${c.itens
+        ? `${c.itens} item(ns) nesta categoria — o tipo só muda depois de mover ou excluir o conteúdo.`
+        : 'categoria vazia'}</div>`,
+    rodape: `<button class="btn" onclick="app.fecharModal()">Cancelar</button>
+             <button class="btn pri" id="caOk">Salvar</button>`,
+  });
+  $('#caOk').onclick = async () => {
+    try {
+      await api(`/categories/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          name: $('#caNome').value.trim(), type: $('#caTipo').value, sort_order: Number($('#caOrdem').value) || 0,
+        }),
+      });
+      fecharModal(); toast('categoria salva', 'ok'); ir('categorias');
+    } catch (e) { toast(e.message, 'err'); }
+  };
+}
+
+function moverCategoria(id) {
+  const c = acharCategoria(id);
+  if (!c) return;
+  const destinos = opcoesDestino(c);
+  modal({
+    titulo: `Mover itens de: ${c.name}`,
+    corpo: destinos
+      ? `<div class="field"><label>Mover os ${c.itens} item(ns) para</label>
+           <select class="inp" id="caDest">${destinos}</select></div>
+         <div class="help">A categoria "${esc(c.name)}" continua existindo, só fica vazia.</div>`
+      : `<div class="help">não existe outra categoria de ${nomeTipo(c.type)} para receber os itens —
+           crie uma primeiro.</div>`,
+    rodape: `<button class="btn" onclick="app.fecharModal()">Cancelar</button>
+             ${destinos ? '<button class="btn pri" id="caOk">Mover</button>' : ''}`,
+  });
+  if (!destinos) return;
+  $('#caOk').onclick = async () => {
+    try {
+      const r = await api(`/categories/${id}/move`, {
+        method: 'POST', body: JSON.stringify({ to: Number($('#caDest').value) }),
+      });
+      fecharModal(); toast(`${r.movidos} item(ns) movido(s)`, 'ok'); ir('categorias');
+    } catch (e) { toast(e.message, 'err'); }
+  };
+}
+
+function excluirCategoria(id) {
+  const c = acharCategoria(id);
+  if (!c) return;
+  if (!c.itens) {
+    return confirmar(`Excluir a categoria "${c.name}"?`, async () => {
+      await api(`/categories/${id}`, { method: 'DELETE' });
+      toast('categoria excluída', 'ok'); ir('categorias');
+    });
+  }
+  const destinos = opcoesDestino(c);
+  const oQue = c.type === 'series'
+    ? `${c.itens} série(s) — com todos os episódios`
+    : `${c.itens} item(ns)`;
+
+  modal({
+    titulo: `Excluir categoria: ${c.name}`,
+    corpo: `
+      <div class="help" style="margin-bottom:12px">A categoria tem <b>${oQue}</b>.
+        O que fazer com esse conteúdo?</div>
+      ${destinos ? `
+        <label class="chk"><input type="radio" name="caAcao" value="mover" checked>
+          mover para outra categoria</label>
+        <div class="field" style="margin:6px 0 14px 23px">
+          <select class="inp" id="caDest">${destinos}</select></div>` : ''}
+      <label class="chk"><input type="radio" name="caAcao" value="apagar" ${destinos ? '' : 'checked'}>
+        apagar o conteúdo junto com a categoria</label>
+      <div class="help" id="caAviso"></div>`,
+    rodape: `<button class="btn" onclick="app.fecharModal()">Cancelar</button>
+             <button class="btn err" id="caOk"></button>`,
+  });
+
+  const acao = () => document.querySelector('input[name=caAcao]:checked').value;
+  const atualizar = () => {
+    const apagar = acao() === 'apagar';
+    $('#caOk').textContent = apagar ? 'Apagar categoria e conteúdo' : 'Mover e excluir';
+    $('#caAviso').innerHTML = apagar
+      ? `<span style="color:var(--err)">Some de vez: ${esc(oQue)} sai do painel e do player dos clientes.
+         Para ter de volta é preciso importar a lista outra vez.</span>`
+      : `O conteúdo vai para a categoria escolhida e só a categoria "${esc(c.name)}" é excluída.`;
+  };
+  document.querySelectorAll('input[name=caAcao]').forEach((r) => { r.onchange = atualizar; });
+  atualizar();
+
+  $('#caOk').onclick = async () => {
+    const btn = $('#caOk');
+    try {
+      btn.disabled = true;
+      const apagar = acao() === 'apagar';
+      const qs = apagar ? 'delete_content=1' : `move_to=${$('#caDest').value}`;
+      const r = await api(`/categories/${id}?${qs}`, { method: 'DELETE' });
+      fecharModal();
+      toast(apagar
+        ? `categoria e ${r.excluidos} item(ns) excluídos`
+        : `categoria excluída, ${r.movidos} item(ns) movido(s)`, 'ok');
+      S.cache.categorias = null;
+      ir('categorias');
+    } catch (e) { btn.disabled = false; toast(e.message, 'err'); }
+  };
+}
+
 // ---------------- importar ----------------
 PAGES.importar = async () => {
   const cfg = await api('/settings');
+  const maxMb = Number(cfg.importMaxMb) || 200;
   $('#view').innerHTML = `
-    <div class="head"><div><h2>Importar lista</h2>
-      <div class="sub">carregue canais, filmes e séries de um arquivo .m3u ou de uma URL</div></div></div>
+    <div class="head"><div><h2>Importar / exportar</h2>
+      <div class="sub">carregue uma lista nova (arquivo, URL ou texto) ou baixe a lista já organizada no painel</div></div></div>
 
     <div class="panel">
       <div class="ph"><b>Origem</b></div>
       <div class="pb">
-        <div class="field"><label>Arquivo no servidor</label>
-          <input class="inp mono" id="imPath" value="${esc(cfg.m3uPath)}"></div>
+        <div class="field"><label>Arquivo da lista <span style="color:var(--dim2)">(.m3u, .m3u8, .txt — até ${maxMb} MB)</span></label>
+          <label class="drop" id="imDrop">
+            <input type="file" id="imFile" accept=".m3u,.m3u8,.txt,audio/x-mpegurl,application/x-mpegurl" hidden>
+            <span class="ic">📎</span>
+            <span><b>Clique para anexar</b> ou arraste o arquivo aqui</span>
+          </label>
+          <div class="help" id="imFileInfo">nenhum arquivo selecionado</div></div>
         <div class="field"><label>ou URL da lista <span style="color:var(--dim2)">(get.php do seu fornecedor, por exemplo)</span></label>
           <input class="inp mono" id="imUrl" placeholder="http://servidor.com/get.php?username=..&password=..&type=m3u_plus"
                  value="${esc(cfg.db.m3u_source_url || '')}"></div>
@@ -1095,6 +1530,7 @@ PAGES.importar = async () => {
         <div class="help">Itens já existentes são atualizados pela URL de origem — os IDs não mudam, então
           os clientes não perdem favoritos.</div>
         <div style="margin-top:14px"><button class="btn pri" id="imOk">Importar agora</button></div>
+        <div id="imProg" class="prog" hidden><i></i></div>
         <div id="imRes" style="margin-top:16px"></div>
       </div>
     </div>
@@ -1103,19 +1539,96 @@ PAGES.importar = async () => {
       <div class="ph"><b>Última importação</b></div>
       <div class="pb" style="color:var(--dim);font-size:13px">
         ${cfg.db.last_import ? fmtHora(Number(cfg.db.last_import)) : 'nenhuma importação registrada'}
+        ${cfg.db.last_import_source ? `<div style="color:var(--dim2);font-size:12px;margin-top:4px">origem: ${esc(cfg.db.last_import_source)}</div>` : ''}
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="ph"><b>Exportar a lista do painel</b></div>
+      <div class="pb">
+        <div class="grid3">
+          <div class="field"><label>Conteúdo</label>
+            <select class="inp" id="exTipo">
+              <option value="all">tudo (canais, filmes e séries)</option>
+              <option value="live">só canais ao vivo</option>
+              <option value="movie">só filmes</option>
+              <option value="series">só séries (episódios)</option>
+            </select></div>
+          <div class="field"><label>Formato</label>
+            <select class="inp" id="exFormato">
+              <option value="m3u">M3U — reimportar em outro painel ou abrir no player</option>
+              <option value="csv">CSV — conferir numa planilha</option>
+            </select></div>
+          <div class="field"><label>&nbsp;</label>
+            <button class="btn pri" id="exOk" style="width:100%">Exportar</button></div>
+        </div>
+        <label class="chk"><input type="checkbox" id="exAtivos" checked>
+          somente itens ativos (o que o cliente vê hoje)</label>
+        <div class="help" id="exResumo">calculando...</div>
+        <div class="help">Sai com os nomes e as categorias como você organizou aqui, apontando para as
+          <b>URLs de origem</b> — serve de backup e para levar a lista para outro painel. Para entregar a um
+          cliente use o link dele em <b>Clientes</b>, que é gerado pelo painel.</div>
       </div>
     </div>`;
 
+  // ---- anexo: clique, arraste e remover ----
+  const inp = $('#imFile');
+  const drop = $('#imDrop');
+
+  const mostrarAnexo = () => {
+    const f = inp.files[0];
+    drop.classList.toggle('has', !!f);
+    $('#imFileInfo').innerHTML = f
+      ? `<b style="color:var(--txt)">${esc(f.name)}</b> · ${fmtTamanho(f.size)}
+         <button class="btn sm" id="imLimpar" style="margin-left:8px">remover</button>`
+      : 'nenhum arquivo selecionado';
+    if ($('#imLimpar')) $('#imLimpar').onclick = (e) => { e.preventDefault(); inp.value = ''; mostrarAnexo(); };
+  };
+
+  inp.onchange = () => {
+    const f = inp.files[0];
+    if (f && f.size > maxMb * 1024 * 1024) {
+      toast(`arquivo maior que o limite de ${maxMb} MB`, 'err');
+      inp.value = '';
+    }
+    mostrarAnexo();
+  };
+
+  ['dragenter', 'dragover'].forEach((ev) => drop.addEventListener(ev, (e) => {
+    e.preventDefault(); drop.classList.add('over');
+  }));
+  ['dragleave', 'dragend'].forEach((ev) => drop.addEventListener(ev, () => drop.classList.remove('over')));
+  drop.addEventListener('drop', (e) => {
+    e.preventDefault(); drop.classList.remove('over');
+    if (e.dataTransfer.files?.length) { inp.files = e.dataTransfer.files; inp.onchange(); }
+  });
+
+  // ---- importar ----
   $('#imOk').onclick = async () => {
     const btn = $('#imOk');
+    const arquivo = inp.files[0];
+    const texto = $('#imTexto').value.trim();
+    const url = $('#imUrl').value.trim();
+    if (!arquivo && !texto && !url) return toast('anexe um arquivo, informe uma URL ou cole o conteúdo', 'err');
+
+    const barra = $('#imProg');
+    barra.hidden = true; $('#imRes').innerHTML = '';
     btn.disabled = true; btn.innerHTML = '<span class="spin"></span> importando...';
-    $('#imRes').innerHTML = '';
-    const body = { reset: $('#imReset').checked, prune: $('#imPrune').checked };
-    if ($('#imTexto').value.trim()) body.content = $('#imTexto').value;
-    else if ($('#imUrl').value.trim()) body.url = $('#imUrl').value.trim();
-    else body.path = $('#imPath').value.trim();
+    const params = { reset: $('#imReset').checked, prune: $('#imPrune').checked };
+
     try {
-      const r = await api('/import', { method: 'POST', body: JSON.stringify(body) });
+      let r;
+      if (arquivo) {
+        barra.hidden = false;
+        r = await enviarArquivo('/import/upload', arquivo, { ...params, name: arquivo.name }, (pct) => {
+          $('#imProg i').style.width = `${Math.round(pct * 100)}%`;
+          if (pct >= 1) btn.innerHTML = '<span class="spin"></span> processando no servidor...';
+        });
+      } else {
+        const body = { ...params };
+        if (texto) body.content = $('#imTexto').value; else body.url = url;
+        r = await api('/import', { method: 'POST', body: JSON.stringify(body) });
+      }
       $('#imRes').innerHTML = `<div class="cards" style="margin:0">
         <div class="stat pri"><div class="n">${r.total}</div><div class="l">entradas lidas</div></div>
         <div class="stat"><div class="n">${r.live}</div><div class="l">canais</div></div>
@@ -1129,7 +1642,51 @@ PAGES.importar = async () => {
     } catch (e) {
       $('#imRes').innerHTML = `<div style="color:var(--err)">${esc(e.message)}</div>`;
     }
+    barra.hidden = true; $('#imProg i').style.width = '0';
     btn.disabled = false; btn.textContent = 'Importar agora';
+  };
+
+  // ---- exportar ----
+  const paramsExport = () => new URLSearchParams({
+    type: $('#exTipo').value, only_enabled: $('#exAtivos').checked ? 1 : 0,
+  });
+  const mostrarResumo = async () => {
+    const alvo = $('#exResumo');
+    try {
+      const r = await api(`/export/resumo?${paramsExport()}`);
+      const partes = [];
+      if (r.live) partes.push(`${fmtNum(r.live)} canais`);
+      if (r.movie) partes.push(`${fmtNum(r.movie)} filmes`);
+      if (r.series) partes.push(`${fmtNum(r.series)} episódios`);
+      alvo.textContent = r.total
+        ? `${fmtNum(r.total)} item(ns) neste filtro — ${partes.join(', ')}`
+        : 'nada para exportar com esse filtro';
+    } catch (e) { alvo.textContent = e.message; }
+  };
+  $('#exTipo').onchange = mostrarResumo;
+  $('#exAtivos').onchange = mostrarResumo;
+  mostrarResumo();
+
+  $('#exOk').onclick = async () => {
+    const btn = $('#exOk');
+    const formato = $('#exFormato').value;
+    btn.disabled = true; btn.innerHTML = '<span class="spin"></span> gerando...';
+    try {
+      const r = await fetch(`/api/export/${formato}?${paramsExport()}`,
+        { headers: { authorization: `Bearer ${S.token}` } });
+      if (r.status === 401) { sair(); throw new Error('sessao expirada'); }
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `erro ${r.status}`);
+      const nome = (r.headers.get('content-disposition') || '').match(/filename="(.+?)"/)?.[1]
+        || `lista.${formato}`;
+      const blob = await r.blob();
+      const link = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = link; a.download = nome;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(link), 10000);
+      toast(`${nome} (${fmtTamanho(blob.size)})`, 'ok');
+    } catch (e) { toast(e.message, 'err'); }
+    btn.disabled = false; btn.textContent = 'Exportar';
   };
 };
 
@@ -1178,6 +1735,8 @@ const app = {
   matarConexao, novoRevendedor, editarRevendedor, darCreditos, excluirRevendedor,
   novoPlano, editarPlano, excluirPlano, novoPacote, editarPacote, excluirPacote, marcarTodas,
   abaConteudo, pagConteudo, alternarConteudo, testarFonte, editarConteudo, excluirConteudo, novoCanal,
+  limparSelecao, moverSelecionados,
+  abaCategoria, verConteudoCategoria, novaCategoria, editarCategoria, moverCategoria, excluirCategoria,
 };
 window.app = app;
 

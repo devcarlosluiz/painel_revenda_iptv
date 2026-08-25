@@ -150,6 +150,34 @@ tbody tr:last-child td{border-bottom:none}
 .help{font-size:12px;color:var(--dim2);margin-top:5px;line-height:1.5}
 .chk{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--txt);cursor:pointer;margin-bottom:10px}
 .chk input{width:15px;height:15px;accent-color:var(--pri)}
+/* medidores do painel do servidor */
+.gauge{height:7px;background:var(--bg);border:1px solid var(--line);border-radius:5px;overflow:hidden;margin-top:8px}
+.gauge i{display:block;height:100%;width:0;background:var(--ok);transition:width .4s}
+.gauge.warn i{background:var(--warn)}
+.gauge.err i{background:var(--err)}
+.cores{display:flex;gap:4px;margin-bottom:16px}
+.cores span{flex:1;min-width:6px}
+.sysinfo{margin-bottom:10px;font-size:13px;line-height:1.45}
+.sysinfo label{font-size:10.5px;text-transform:uppercase;letter-spacing:.6px;color:var(--dim2);margin-bottom:2px}
+
+/* barra de acoes da selecao em lote */
+.bulk{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 16px;
+  border-bottom:1px solid var(--line);background:rgba(47,129,247,.09);font-size:13px}
+.bulk b{color:var(--txt)}
+table input[type=checkbox]{width:15px;height:15px;accent-color:var(--pri);cursor:pointer}
+
+/* area de anexo da lista */
+.drop{display:flex;align-items:center;gap:12px;background:var(--bg);border:1px dashed #33445a;border-radius:8px;
+  padding:16px 14px;cursor:pointer;font-size:13px;color:var(--dim);transition:.12s}
+.drop:hover{border-color:var(--pri);color:var(--txt)}
+.drop.over{border-color:var(--pri);background:rgba(47,129,247,.08);color:var(--txt)}
+.drop.has{border-style:solid;border-color:var(--ok)}
+.drop .ic{font-size:18px}
+.drop b{color:var(--txt);font-weight:500}
+
+.prog{height:6px;background:var(--bg3);border:1px solid var(--line);border-radius:5px;overflow:hidden;margin-top:12px}
+.prog i{display:block;height:100%;width:0;background:var(--pri);transition:width .15s}
+
 .spin{display:inline-block;width:13px;height:13px;border:2px solid #ffffff44;border-top-color:#fff;
   border-radius:50%;animation:sp .7s linear infinite}
 @keyframes sp{to{transform:rotate(360deg)}}
